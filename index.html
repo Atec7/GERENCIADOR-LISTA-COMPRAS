@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>Lista de Compras</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Bootstrap -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <!-- jsPDF para exportar PDF -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <style>
+    body { background: #f8f9fa; }
+    .card-box { padding: 10px; border-radius: 6px; margin-bottom: 10px; }
+    .saldo-box { background: #198754; color: #fff; }
+    .total-box { background: #0d6efd; color: #fff; }
+    .table-responsive { max-height: 420px; overflow-y: auto; }
+    thead th { position: sticky; top: 0; background: #e9ecef; z-index: 2; }
+    .btn-sm { padding: 6px 10px; }
+    .progress { height: 18px; }
+    .badge { font-weight: 600; }
+    .nowrap { white-space: nowrap; }
+  </style>
+
+  <!-- Firebase (module) -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+    import { getDatabase, ref, push, set, update, onValue, remove } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+    // Configuração Firebase
+    const firebaseConfig = {
+      apiKey: "AIzaSyD9kWG_RgdfBURwHafLWcN3P_qVxMvqHTE",
+      authDomain: "demobarbearia-4eb73.firebaseapp.com",
+      databaseURL: "https://demobarbearia-4eb73-default-rtdb.firebaseio.com",
+      projectId: "demobarbearia-4eb73",
+      storageBucket: "demobarbearia-4eb73.firebasestorage.app",
+      messagingSenderId: "522986196174",
+      appId: "1:522986196174:web:7d78eb757acf64f3ff149f",
+      measurementId: "G-S0NJ2LX550"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+
+    // Usuário fixo
+    const USER_ID = "61892903377";
+
+    // Estado local
+    let saldoInicial = 0;
+    let saldoAtual = 0;
+    let totalCompras = 0;
+
+    const formatarBRL = valor =>
+      valor.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+
+    // Inicialização: garantir nó meta e carregar dados
+    function init() {
+      // cria nó meta se não existir (update cria automaticamente)
+      update(ref(db, `usuarios/${USER_ID}/meta`), { saldoInicial: 0 }).catch(()=>{});
+      carregarDados();
+    }
+
+    // Definir saldo inicial
+    window.definirSaldo = async function() {
+      const valor = parseFloat(document.getElementById("saldoInicial").value);
+      if (isNaN(valor)) { alert("Digite um saldo válido."); return; }
+      saldoInicial = valor;
+      saldoAtual = saldoInicial - totalCompras;
+      await update(ref(db, `usuarios/${USER_ID}/meta`), { saldoInicial });
+      atualizarUI();
+    };
+
+    // Adicionar produto
+    window.adicionarProduto = async function() {
+      const produto = document.getElementById("produto").value.trim();
+      const quantidade = parseInt(document.getElementById("quantidade").value, 10);
+      const categoria = document.getElementById("categoria").value;
+
+      if (!(produto && quantidade > 0 && categoria)) {
+        alert("Preencha produto, quantidade e categoria.");
+        return;
+      }
+
+      const comprasRef = ref(db, `usuarios/${USER_ID}/compras`);
+      const novaRef = push(comprasRef);
+      await set(novaRef, { produto, quantidade, categoria, preco: 0, total: 0 });
+
+      document.getElementById("produto").value = "";
+      document.getElementById("quantidade").value = 1;
+      document.getElementById("categoria").value = "";
+    };
+
+    // Atualizar quantidade (linha)
+    async function atualizarQuantidadeLinha(linha, novaQtd) {
+      const key = linha.getAttribute("data-key");
+      const qtdNum = parseInt(novaQtd, 10);
+      const precoInput = linha.cells[3].querySelector("input");
+      const precoNum = parseFloat(precoInput.value);
+
+      if (!isNaN(qtdNum) && qtdNum > 0 && !isNaN(precoNum) && precoNum > 0) {
+        const totalNovo = qtdNum * precoNum;
+        await update(ref(db, `usuarios/${USER_ID}/compras/${key}`), {
+          quantidade: qtdNum,
+          total: totalNovo
+        });
+      } else {
+        // quantidade inválida: zera total
+        await update(ref(db, `usuarios/${USER_ID}/compras/${key}`), {
+          quantidade: isNaN(qtdNum) ? 0 : Math.max(qtdNum, 0),
+          total: 0
+        });
+      }
+    }
+
+    // Atualizar preço (linha)
+    async function atualizarPrecoLinha(linha, quantidade, preco) {
+      const key = linha.getAttribute("data-key");
+      const qtdNum = parseInt(quantidade, 10);
+      const precoNum = parseFloat(preco);
+
+      if (!isNaN(precoNum) && precoNum > 0 && !isNaN(qtdNum) && qtdNum > 0) {
+        const totalNovo = qtdNum * precoNum;
+        await update(ref(db, `usuarios/${USER_ID}/compras/${key}`), {
+          preco: precoNum,
+          total: totalNovo
+        });
+      } else {
+        await update(ref(db, `usuarios/${USER_ID}/compras/${key}`), {
+          preco: 0,
+          total: 0
+        });
+      }
+    }
+
+    // Remover linha
+    async function removerLinha(linha) {
+      const key = linha.getAttribute("data-key");
+      await remove(ref(db, `usuarios/${USER_ID}/compras/${key}`));
+    }
+
+    // Limpar dados em massa
+    window.limparDados = async function() {
+      if (!confirm("Tem certeza que deseja apagar TODAS as compras?")) return;
+      await remove(ref(db, `usuarios/${USER_ID}/compras`));
+    };
+
+    // Filtro de categoria
+    window.filtrarCategoria = function() {
+      const filtro = document.getElementById("filtroCategoria").value;
+      const linhas = document.querySelectorAll("#tabelaCompras tr");
+      linhas.forEach(linha => {
+        const categoria = linha.cells[2]?.textContent || "";
+        linha.style.display = (filtro === "todas" || categoria === filtro) ? "" : "none";
+      });
+    };
+
+    // Mostrar/Esconder formulário
+    window.toggleFormulario = function() {
+      const form = document.getElementById("formulario");
+      form.style.display = form.style.display === "none" ? "block" : "none";
+    };
+
+    // Exportar PDF com estatísticas por categoria
+    window.exportarPDF = async function() {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ unit: "pt", format: "a4" });
+
+      const margem = 40;
+      let y = margem;
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(16);
+      doc.text("Lista de Compras", margem, y);
+      y += 24;
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(11);
+      doc.text(`Saldo inicial: ${formatarBRL(saldoInicial)}`, margem, y); y += 16;
+      doc.text(`Saldo atual: ${formatarBRL(saldoAtual)}`, margem, y); y += 16;
+      doc.text(`Total gasto: ${formatarBRL(totalCompras)}`, margem, y); y += 24;
+
+      // Estatísticas por categoria
+      const linhas = document.querySelectorAll("#tabelaCompras tr");
+      const categorias = {};
+      linhas.forEach(linha => {
+        const cat = linha.cells[2]?.textContent || "Outros";
+        const tot = linha.cells[4]?.textContent || "-";
+        const valor = tot !== "-" ? extrairNumero(tot) : 0;
+        categorias[cat] = (categorias[cat] || 0) + valor;
+      });
+
+      doc.setFont("helvetica", "bold");
+      doc.text("Resumo por categoria:", margem, y); y += 18;
+      doc.setFont("helvetica", "normal");
+      let maiorCat = "", maiorVal = 0;
+      Object.keys(categorias).forEach(cat => {
+        const val = categorias[cat];
+        if (val > maiorVal) { maiorVal = val; maiorCat = cat; }
+        const pct = totalCompras > 0 ? ((val / totalCompras) * 100).toFixed(1) : "0.0";
+        doc.text(`${cat}: ${formatarBRL(val)} (${pct}%)`, margem, y);
+        y += 16;
+      });
+      if (maiorCat) {
+        y += 10;
+        doc.setFont("helvetica", "bold");
+        doc.text(`Categoria com maior gasto: ${maiorCat} (${formatarBRL(maiorVal)})`, margem, y);
+        doc.setFont("helvetica", "normal");
+        y += 24;
+      }
+
+      // Tabela de compras
+      const cols = ["Produto", "Quantidade", "Categoria", "Preço unitário", "Total"];
+      const colWidths = [160, 90, 110, 110, 110];
+      const startX = margem;
+      const rowHeight = 18;
+
+      doc.setFont("helvetica", "bold");
+      cols.forEach((c, i) => {
+        const x = startX + colWidths.slice(0, i).reduce((a, b) => a + b, 0);
+        doc.text(c, x, y);
+      });
+      y += rowHeight;
+      doc.setFont("helvetica", "normal");
+
+      linhas.forEach(linha => {
+        const produto = linha.cells[0]?.textContent || "";
+        const quantidade = linha.cells[1]?.querySelector("input")?.value || "";
+        const categoria = linha.cells[2]?.textContent || "";
+        const precoRaw = linha.cells[3]?.querySelector("input")?.value || "";
+        const preco = precoRaw ? formatarBRL(parseFloat(precoRaw)) : "-";
+        const total = linha.cells[4]?.textContent || "-";
+
+        if (y > doc.internal.pageSize.getHeight() - margem - rowHeight) {
+          doc.addPage();
+          y = margem;
+          doc.setFont("helvetica", "bold");
+          cols.forEach((c, i) => {
+            const x = startX + colWidths.slice(0, i).reduce((a, b) => a + b, 0);
+            doc.text(c, x, y);
+          });
+          y += rowHeight;
+          doc.setFont("helvetica", "normal");
+        }
+
+        const valores = [produto, String(quantidade), categoria, preco, total];
+        valores.forEach((v, i) => {
+          const x = startX + colWidths.slice(0, i).reduce((a, b) => a + b, 0);
+          doc.text(String(v), x, y);
+        });
+        y += rowHeight;
+      });
+
+      const data = new Date();
+      const rodape = `Gerado em ${data.toLocaleDateString("pt-BR")} ${data.toLocaleTimeString("pt-BR")}`;
+      doc.setFontSize(9);
+      doc.text(rodape, margem, doc.internal.pageSize.getHeight() - 20);
+
+      doc.save("lista_compras.pdf");
+    };
+
+    // Helpers UI
+    function atualizarUI() {
+      document.getElementById("saldoAtual").textContent = formatarBRL(saldoAtual);
+      document.getElementById("totalCompras").textContent = formatarBRL(totalCompras);
+
+      let consumidoPct = 0;
+      let gastoPct = 0;
+      if (saldoInicial > 0) {
+        consumidoPct = ((saldoInicial - saldoAtual) / saldoInicial) * 100;
+        gastoPct = (totalCompras / saldoInicial) * 100;
+      } else {
+        consumidoPct = totalCompras > 0 ? 100 : 0;
+        gastoPct = totalCompras > 0 ? 100 : 0;
+      }
+      consumidoPct = Math.max(0, Math.min(100, consumidoPct));
+      gastoPct = Math.max(0, Math.min(100, gastoPct));
+
+      const barraSaldo = document.getElementById("barraSaldo");
+      const barraItens = document.getElementById("barraItens");
+      barraSaldo.style.width = consumidoPct.toFixed(0) + "%";
+      barraSaldo.textContent = consumidoPct.toFixed(0) + "%";
+      barraItens.style.width = gastoPct.toFixed(0) + "%";
+      barraItens.textContent = gastoPct.toFixed(0) + "%";
+
+      const alertaDiv = document.getElementById("alertaSaldo");
+      alertaDiv.innerHTML = "";
+      if (saldoInicial > 0) {
+        const restantePct = saldoAtual / saldoInicial;
+        if (restantePct <= 0.2 && saldoAtual >= 0) {
+          alertaDiv.innerHTML = `<div class="alert alert-warning py-2 mb-0 text-center">
+            ⚠️ Atenção: saldo está baixo (${formatarBRL(saldoAtual)} restantes).
+          </div>`;
+        } else if (saldoAtual < 0) {
+          alertaDiv.innerHTML = `<div class="alert alert-danger py-2 mb-0 text-center">
+            ❗ Saldo negativo: ${formatarBRL(saldoAtual)}.
+          </div>`;
+        }
+      } else if (saldoAtual < 0) {
+        alertaDiv.innerHTML = `<div class="alert alert-danger py-2 mb-0 text-center">
+          ❗ Saldo negativo: ${formatarBRL(saldoAtual)}.
+        </div>`;
+      }
+    }
+
+    function extrairNumero(texto) {
+      const limpo = texto.replace(/[^\d,-]/g, "").replace(/\./g, "").replace(",", ".");
+      return parseFloat(limpo) || 0;
+    }
+
+    // Carregar dados em tempo real
+    function carregarDados() {
+      const metaRef = ref(db, `usuarios/${USER_ID}/meta`);
+      onValue(metaRef, snap => {
+        saldoInicial = Number(snap.val()?.saldoInicial || 0);
+        saldoAtual = saldoInicial - totalCompras;
+        atualizarUI();
+      });
+
+      const comprasRef = ref(db, `usuarios/${USER_ID}/compras`);
+      onValue(comprasRef, snapshot => {
+        const tbody = document.getElementById("tabelaCompras");
+        tbody.innerHTML = "";
+        totalCompras = 0;
+
+        snapshot.forEach(child => {
+          const key = child.key;
+          const item = child.val() || {};
+          const produto = item.produto || "";
+          const quantidade = Number(item.quantidade || 1);
+          const categoria = item.categoria || "Outros";
+          const preco = item.preco ? Number(item.preco) : 0;
+          const total = item.total ? Number(item.total) : 0;
+
+          totalCompras += total;
+
+          const linha = tbody.insertRow();
+          linha.setAttribute("data-key", key);
+
+          linha.insertCell(0).textContent = produto;
+
+          const qtdCell = linha.insertCell(1);
+          const inputQtd = document.createElement("input");
+          inputQtd.type = "number";
+          inputQtd.min = "1";
+          inputQtd.value = quantidade;
+          inputQtd.className = "form-control form-control-sm";
+          inputQtd.onchange = function () { atualizarQuantidadeLinha(linha, inputQtd.value); };
+          qtdCell.appendChild(inputQtd);
+
+          linha.insertCell(2).textContent = categoria;
+
+          const precoCell = linha.insertCell(3);
+          const inputPreco = document.createElement("input");
+          inputPreco.type = "number";
+          inputPreco.step = "0.01";
+          inputPreco.value = preco ? preco.toFixed(2) : "";
+          inputPreco.className = "form-control form-control-sm";
+          inputPreco.onchange = function () { atualizarPrecoLinha(linha, inputQtd.value, inputPreco.value); };
+          precoCell.appendChild(inputPreco);
+
+          linha.insertCell(4).textContent = total > 0 ? formatarBRL(total) : "-";
+
+          const acoesCell = linha.insertCell(5);
+          const btnRemover = document.createElement("button");
+          btnRemover.className = "btn btn-outline-danger btn-sm";
+          btnRemover.textContent = "Remover";
+          btnRemover.onclick = function () { removerLinha(linha); };
+          acoesCell.appendChild(btnRemover);
+        });
+
+        saldoAtual = saldoInicial - totalCompras;
+        atualizarUI();
+      });
+    }
+
+    // Inicializa
+    init();
+  </script>
+</head>
+<body class="container py-3">
+
+  <h3 class="mb-3 text-center">🛒 Lista de Compras</h3>
+
+  <!-- Cards compactos lado a lado -->
+  <div class="row g-2 mb-2">
+    <div class="col-12 col-md-6">
+      <div class="card-box saldo-box">
+        <div class="row g-2 align-items-center">
+          <div class="col-12 col-sm-7">
+            <label class="form-label mb-1">Saldo inicial (R$):</label>
+            <div class="input-group">
+              <input type="number" id="saldoInicial" class="form-control form-control-sm" step="0.01" />
+              <button class="btn btn-light btn-sm" onclick="definirSaldo()">Definir</button>
+            </div>
+          </div>
+          <div class="col-12 col-sm-5 text-sm-end mt-2 mt-sm-0">
+            <span class="badge bg-light text-dark">Saldo atual:</span>
+            <span id="saldoAtual" class="fw-bold">R$ 0,00</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col-12 col-md-6">
+      <div class="card-box total-box d-flex justify-content-between align-items-center">
+        <div>
+          <span class="badge bg-light text-dark">Total gasto:</span>
+          <span id="totalCompras" class="fw-bold">R$ 0,00</span>
+        </div>
+        <div class="d-flex gap-2">
+          <button class="btn btn-success btn-sm" onclick="exportarPDF()">Exportar PDF</button>
+          <button class="btn btn-outline-danger btn-sm" onclick="limparDados()">Limpar Dados</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Barras de progresso -->
+  <div class="mb-2">
+    <div class="row g-2">
+      <div class="col-12 col-md-6">
+        <label class="form-label mb-1">Saldo consumido:</label>
+        <div class="progress">
+          <div id="barraSaldo" class="progress-bar bg-danger" role="progressbar" style="width:0%">0%</div>
+        </div>
+      </div>
+      <div class="col-12 col-md-6">
+        <label class="form-label mb-1">Itens lançados (em % do saldo inicial):</label>
+        <div class="progress">
+          <div id="barraItens" class="progress-bar bg-info" role="progressbar" style="width:0%">0%</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Alertas de saldo -->
+  <div id="alertaSaldo" class="mb-2"></div>
+
+  <!-- Linha de controles -->
+  <div class="d-flex flex-wrap gap-2 mb-2">
+    <button class="btn btn-secondary btn-sm" onclick="toggleFormulario()">Mostrar/Esconder formulário</button>
+    <div class="ms-auto d-flex align-items-center gap-2">
+      <label for="filtroCategoria" class="form-label mb-0">Filtrar categoria:</label>
+      <select id="filtroCategoria" class="form-select form-select-sm" onchange="filtrarCategoria()">
+        <option value="todas">Todas</option>
+        <option>Hortifruti</option>
+        <option>Padaria</option>
+        <option>Limpeza</option>
+        <option>Bebidas</option>
+        <option>Mercearia</option>
+        <option>Outros</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Formulário de produtos -->
+  <div id="formulario" class="card p-2 mb-2">
+    <h6 class="mb-2">Registrar produto</h6>
+    <div class="row g-2">
+      <div class="col-12 col-md-4">
+        <input type="text" id="produto" class="form-control form-control-sm" placeholder="Produto" />
+      </div>
+      <div class="col-6 col-md-2">
+        <input type="number" id="quantidade" class="form-control form-control-sm" min="1" value="1" placeholder="Qtd" />
+      </div>
+      <div class="col-6 col-md-3">
+        <select id="categoria" class="form-select form-select-sm">
+          <option value="">Categoria...</option>
+          <option>Hortifruti</option>
+          <option>Padaria</option>
+          <option>Limpeza</option>
+          <option>Bebidas</option>
+          <option>Mercearia</option>
+          <option>Outros</option>
+        </select>
+      </div>
+      <div class="col-12 col-md-3 d-grid">
+        <button class="btn btn-primary btn-sm" onclick="adicionarProduto()">Registrar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabela de compras -->
+  <div class="table-responsive">
+    <table class="table table-striped table-bordered align-middle text-center">
+      <thead>
+        <tr>
+          <th>Produto</th>
+          <th class="nowrap">Quantidade</th>
+          <th>Categoria</th>
+          <th class="nowrap">Preço unitário (R$)</th>
+          <th class="nowrap">Total (R$)</th>
+          <th class="nowrap">Ações</th>
+        </tr>
+      </thead>
+      <tbody id="tabelaCompras"></tbody>
+    </table>
+  </div>
+</body>
+  </html>
